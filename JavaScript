@@ -1,0 +1,586 @@
+
+require("dotenv").config();
+
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const helmet = require("helmet");
+const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const db = require("./database");
+
+const app = express();
+
+app.use(helmet());
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.static("public"));
+
+app.use("/api", rateLimit({
+  windowMs: 60 * 1000,
+  limit: 100
+}));
+
+const PORT = process.env.PORT || 3000;
+const SECRET = process.env.JWT_SECRET;
+
+if (!SECRET || SECRET.length < 32 ||
+    !process.env.ADMIN_PASSWORD) {
+  throw new Error("Konfigurasi rahasia server belum benar.");
+}
+
+const PRICES = {
+  3: { price: 5000, days: 3 },
+  7: { price: 10000, days: 7 },
+  30: { price: 40000, days: 30 },
+  0: { price: 100000, days: 0 }
+};
+
+function makeKey() {
+  return "ZANN-" +
+    crypto.randomBytes(12).toString("hex").toUpperCase();
+}
+
+function token(payload) {
+  return jwt.sign(payload, SECRET, { expiresIn: "12h" });
+}
+
+function auth(req, res, next) {
+  try {
+    const value = req.headers.authorization || "";
+    const t = value.startsWith("Bearer ")
+      ? value.slice(7) : "";
+
+    req.user = jwt.verify(t, SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: "Silakan login kembali." });
+  }
+}
+
+function admin(req, res, next) {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Akses admin ditolak." });
+  }
+  next();
+}
+
+function activeKey(req, res, next) {
+  if (req.user.role === "admin") return next();
+
+  const key = db.prepare(`
+    SELECT * FROM keys_table
+    WHERE user_id = ? AND status = 'ACTIVE'
+    ORDER BY id DESC LIMIT 1
+  `).get(req.user.id);
+
+  if (!key) {
+    return res.status(403).json({
+      error: "KEY tidak aktif. Silakan beli atau gunakan KEY."
+    });
+  }
+
+  if (!key.permanent && key.expires_at <= Date.now()) {
+    db.prepare(`
+      UPDATE keys_table SET status = 'EXPIRED'
+      WHERE id = ?
+    `).run(key.id);
+
+    return res.status(403).json({
+      error: "MASA AKTIF KEY HABIS. Akses game ditutup."
+    });
+  }
+
+  req.activeKey = key;
+  next();
+}
+
+function ownHost(req, res, next) {
+  const host = db.prepare(`
+    SELECT * FROM hosts WHERE id = ? AND owner_id = ?
+  `).get(Number(req.params.hostId), req.user.id);
+
+  if (!host) {
+    return res.status(404).json({
+      error: "Host tidak ditemukan."
+    });
+  }
+
+  req.host = host;
+  next();
+}
+
+// LANDING / DAFTAR HARGA
+app.get("/api/plans", (req, res) => {
+  res.json({
+    name: "ZANN ELIMINASI VIP",
+    payment: "Transfer manual",
+    plans: [
+      { days: 3, price: 5000 },
+      { days: 7, price: 10000 },
+      { days: 30, price: 40000 },
+      { days: 0, price: 100000, permanent: true }
+    ]
+  });
+});
+
+// LOGIN ADMIN
+app.post("/api/admin/login", async (req, res) => {
+  const { password } = req.body;
+
+  if (
+    typeof password !== "string" ||
+    !await bcrypt.compare(
+      password,
+      await bcrypt.hash(process.env.ADMIN_PASSWORD, 10)
+    ).catch(() => false)
+  ) {
+    // Gunakan perbandingan hash pada produksi.
+    if (password !== process.env.ADMIN_PASSWORD) {
+      return res.status(401).json({
+        error: "Password admin salah."
+      });
+    }
+  }
+
+  res.json({
+    token: token({ role: "admin" }),
+    role: "admin"
+  });
+});
+
+// ADMIN MEMBUAT KEY
+app.post("/api/admin/keys", auth, admin, (req, res) => {
+  const { quantity, days } = req.body;
+  const count = Number(quantity);
+
+  if (!Number.isInteger(count) || count < 1 || count > 1000) {
+    return res.status(400).json({
+      error: "Jumlah KEY harus 1 sampai 1000 per permintaan."
+    });
+  }
+
+  if (![3, 7, 30, 0].includes(Number(days))) {
+    return res.status(400).json({ error: "Paket tidak valid." });
+  }
+
+  const create = db.transaction(() => {
+    const result = [];
+
+    for (let i = 0; i < count; i++) {
+      const code = makeKey();
+
+      db.prepare(`
+        INSERT INTO keys_table (code, duration, permanent)
+        VALUES (?, ?, ?)
+      `).run(code, days, days === 0 ? 1 : 0);
+
+      result.push(code);
+    }
+
+    return result;
+  });
+
+  res.json({ keys: create() });
+});
+
+// LOGIN MENGGUNAKAN KEY
+app.post("/api/login", (req, res) => {
+  const code = String(req.body.key || "").trim().toUpperCase();
+
+  const key = db.prepare(`
+    SELECT * FROM keys_table WHERE code = ?
+  `).get(code);
+
+  if (!key) {
+    return res.status(401).json({ error: "KEY tidak ditemukan." });
+  }
+
+  if (["EXPIRED", "CANCELLED"].includes(key.status)) {
+    return res.status(403).json({ error: "KEY tidak berlaku." });
+  }
+
+  if (key.status === "ACTIVE" &&
+      !key.permanent && key.expires_at <= Date.now()) {
+    db.prepare("UPDATE keys_table SET status='EXPIRED' WHERE id=?")
+      .run(key.id);
+
+    return res.status(403).json({ error: "KEY kedaluwarsa." });
+  }
+
+  let userId = key.user_id;
+
+  if (key.status === "UNUSED") {
+    const username = "user_" + crypto.randomBytes(6).toString("hex");
+
+    const info = db.prepare(`
+      INSERT INTO users (username) VALUES (?)
+    `).run(username);
+
+    userId = Number(info.lastInsertRowid);
+
+    const now = Date.now();
+    const expires = key.permanent
+      ? null
+      : now + key.duration * 24 * 60 * 60 * 1000;
+
+    db.prepare(`
+      UPDATE keys_table
+      SET user_id=?, status='ACTIVE',
+          activated_at=?, expires_at=?
+      WHERE id=?
+    `).run(userId, now, expires, key.id);
+  }
+
+  res.json({
+    token: token({ id: userId, role: "user" }),
+    role: "user",
+    permanent: Boolean(key.permanent),
+    expiresAt: key.expires_at
+  });
+});
+
+// STATUS AKUN
+app.get("/api/me", auth, activeKey, (req, res) => {
+  res.json({
+    role: req.user.role,
+    key: req.activeKey ? {
+      status: req.activeKey.status,
+      permanent: Boolean(req.activeKey.permanent),
+      expiresAt: req.activeKey.expires_at
+    } : "ADMIN"
+  });
+});
+
+// STORE: BUAT TRANSAKSI
+app.post("/api/orders", (req, res) => {
+  const { days, quantity, buyer } = req.body;
+  const plan = PRICES[Number(days)];
+  const count = Number(quantity);
+
+  if (!plan || !Number.isInteger(count) ||
+      count < 1 || count > 100) {
+    return res.status(400).json({
+      error: "Paket atau jumlah KEY tidak valid."
+    });
+  }
+
+  if (typeof buyer !== "string" || buyer.trim().length < 2 ||
+      buyer.length > 60) {
+    return res.status(400).json({
+      error: "Nama pembeli tidak valid."
+    });
+  }
+
+  const orderCode = "ZVIP-" +
+    crypto.randomBytes(5).toString("hex").toUpperCase();
+
+  const info = db.prepare(`
+    INSERT INTO orders
+    (order_code, quantity, total, duration)
+    VALUES (?, ?, ?, ?)
+  `).run(orderCode, count, count * plan.price, Number(days));
+
+  res.json({
+    id: info.lastInsertRowid,
+    orderCode,
+    buyer: buyer.trim(),
+    quantity: count,
+    total: count * plan.price,
+    payment: "Transfer manual",
+    destination: process.env.PAYMENT_PHONE,
+    status: "PENDING",
+    message: "Selesaikan pembayaran lalu tunggu verifikasi admin."
+  });
+});
+
+// CEK TRANSAKSI
+app.get("/api/orders/:code", (req, res) => {
+  const order = db.prepare(`
+    SELECT order_code, quantity, total, duration, status
+    FROM orders WHERE order_code=?
+  `).get(req.params.code);
+
+  if (!order) {
+    return res.status(404).json({ error: "Transaksi tidak ditemukan." });
+  }
+
+  res.json(order);
+});
+
+// ADMIN VERIFIKASI PEMBAYARAN
+app.post("/api/admin/orders/:id/verify", auth, admin, (req, res) => {
+  const issue = db.transaction(() => {
+    const order = db.prepare(`
+      SELECT * FROM orders WHERE id=?
+    `).get(Number(req.params.id));
+
+    if (!order) throw new Error("Transaksi tidak ditemukan.");
+
+    if (order.status === "PAID") {
+      throw new Error("Transaksi sudah diproses.");
+    }
+
+    if (order.status !== "PENDING") {
+      throw new Error("Status transaksi tidak dapat diverifikasi.");
+    }
+
+    const keys = [];
+
+    for (let i = 0; i < order.quantity; i++) {
+      const code = makeKey();
+
+      db.prepare(`
+        INSERT INTO keys_table (code, duration, permanent)
+        VALUES (?, ?, ?)
+      `).run(code, order.duration, order.duration === 0 ? 1 : 0);
+
+      keys.push(code);
+    }
+
+    db.prepare(`
+      UPDATE orders SET status='PAID' WHERE id=?
+    `).run(order.id);
+
+    return keys;
+  });
+
+  try {
+    res.json({
+      status: "PAID",
+      keys: issue()
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// MEMBUAT HOST SENDIRI
+app.post("/api/hosts", auth, activeKey, (req, res) => {
+  const username = String(req.body.username || "").trim();
+
+  if (!username || username.length > 40) {
+    return res.status(400).json({ error: "Username tidak valid." });
+  }
+
+  const info = db.prepare(`
+    INSERT INTO hosts (owner_id, username)
+    VALUES (?, ?)
+  `).run(req.user.id, username);
+
+  res.json({
+    hostId: Number(info.lastInsertRowid),
+    username,
+    connected: false
+  });
+});
+
+// DAFTAR HOST MILIK SENDIRI
+app.get("/api/hosts", auth, activeKey, (req, res) => {
+  const hosts = db.prepare(`
+    SELECT id, username, connected
+    FROM hosts WHERE owner_id=?
+  `).all(req.user.id);
+
+  res.json(hosts);
+});
+
+// STATUS CONNECT / DISCONNECT
+// Belum menyatakan TikTok benar-benar tersambung.
+// Integrasi LIVE harus dipasang melalui adapter resmi/terotorisasi.
+app.post("/api/hosts/:hostId/connect", auth, activeKey,
+  ownHost, (req, res) => {
+    res.status(503).json({
+      connected: false,
+      error: "Adapter TikTok LIVE belum dikonfigurasi. Tidak ada event gift yang diterima."
+    });
+  });
+
+app.post("/api/hosts/:hostId/disconnect", auth, activeKey,
+  ownHost, (req, res) => {
+    db.prepare(`
+      UPDATE hosts SET connected=0 WHERE id=?
+    `).run(req.host.id);
+
+    res.json({ connected: false });
+  });
+
+// TAMBAH PESERTA
+app.post("/api/hosts/:hostId/participants",
+  auth, activeKey, ownHost, (req, res) => {
+    const name = String(req.body.name || "").trim();
+
+    if (!name || name.length > 60) {
+      return res.status(400).json({ error: "Nama tidak valid." });
+    }
+
+    const session = db.prepare(`
+      SELECT * FROM game_sessions
+      WHERE host_id=? AND game_type='elimination'
+      ORDER BY id DESC LIMIT 1
+    `).get(req.host.id);
+
+    if (session && session.status === "RUNNING" &&
+        session.locked && session.ends_at <= Date.now()) {
+      return res.status(403).json({
+        error: "LOCKED: waktu habis, peserta tidak bisa masuk."
+      });
+    }
+
+    const info = db.prepare(`
+      INSERT INTO participants (host_id, name)
+      VALUES (?, ?)
+    `).run(req.host.id, name);
+
+    res.json({ id: Number(info.lastInsertRowid), name });
+  });
+
+// LIHAT PESERTA
+app.get("/api/hosts/:hostId/participants",
+  auth, activeKey, ownHost, (req, res) => {
+    res.json(db.prepare(`
+      SELECT id, name, eliminated
+      FROM participants WHERE host_id=?
+      ORDER BY id DESC
+    `).all(req.host.id));
+  });
+
+// HAPUS PESERTA
+app.delete("/api/hosts/:hostId/participants/:id",
+  auth, activeKey, ownHost, (req, res) => {
+    db.prepare(`
+      DELETE FROM participants WHERE id=? AND host_id=?
+    `).run(Number(req.params.id), req.host.id);
+
+    res.json({ success: true });
+  });
+
+// RESET PESERTA
+app.delete("/api/hosts/:hostId/participants",
+  auth, activeKey, ownHost, (req, res) => {
+    const archive = db.transaction(() => {
+      const people = db.prepare(`
+        SELECT * FROM participants WHERE host_id=?
+      `).all(req.host.id);
+
+      db.prepare(`
+        INSERT INTO game_history (host_id, game_type, details)
+        VALUES (?, 'elimination', ?)
+      `).run(req.host.id, JSON.stringify(people));
+
+      db.prepare(`
+        DELETE FROM participants WHERE host_id=?
+      `).run(req.host.id);
+    });
+
+    archive();
+    res.json({ success: true });
+  });
+
+// TIMER GAME
+app.post("/api/hosts/:hostId/timer",
+  auth, activeKey, ownHost, (req, res) => {
+    const seconds = Number(req.body.seconds);
+    const locked = Boolean(req.body.locked);
+    const gameType = req.body.gameType === "auction"
+      ? "auction" : "elimination";
+
+    if (!Number.isInteger(seconds) || seconds < 1 ||
+        seconds > 86400) {
+      return res.status(400).json({ error: "Durasi tidak valid." });
+    }
+
+    const endsAt = Date.now() + seconds * 1000;
+
+    const info = db.prepare(`
+      INSERT INTO game_sessions
+      (host_id, game_type, status, duration, ends_at, locked)
+      VALUES (?, ?, 'RUNNING', ?, ?, ?)
+    `).run(
+      req.host.id, gameType, seconds, endsAt,
+      locked ? 1 : 0
+    );
+
+    res.json({
+      sessionId: Number(info.lastInsertRowid),
+      gameType,
+      status: "RUNNING",
+      endsAt,
+      locked
+    });
+  });
+
+// STATUS TIMER
+app.get("/api/hosts/:hostId/timer/:type",
+  auth, activeKey, ownHost, (req, res) => {
+    const type = req.params.type === "auction"
+      ? "auction" : "elimination";
+
+    const session = db.prepare(`
+      SELECT * FROM game_sessions
+      WHERE host_id=? AND game_type=?
+      ORDER BY id DESC LIMIT 1
+    `).get(req.host.id, type);
+
+    if (!session) {
+      return res.json({ status: "IDLE" });
+    }
+
+    const remaining = session.status === "RUNNING"
+      ? Math.max(0, Math.ceil((session.ends_at - Date.now()) / 1000))
+      : 0;
+
+    if (session.status === "RUNNING" && remaining === 0) {
+      db.prepare(`
+        UPDATE game_sessions SET status='FINISHED'
+        WHERE id=?
+      `).run(session.id);
+
+      session.status = "FINISHED";
+    }
+
+    res.json({
+      status: session.status,
+      remaining,
+      locked: Boolean(session.locked)
+    });
+  });
+
+// MANUAL GIFT
+app.post("/api/hosts/:hostId/gifts",
+  auth, activeKey, ownHost, (req, res) => {
+    const sender = String(req.body.sender || "").trim();
+    const gift = String(req.body.gift || "").trim();
+    const amount = Number(req.body.amount);
+
+    if (!sender || !gift ||
+        sender.length > 60 || gift.length > 60 ||
+        !Number.isInteger(amount) || amount < 1 || amount > 10000) {
+      return res.status(400).json({ error: "Data gift tidak valid." });
+    }
+
+    const info = db.prepare(`
+      INSERT INTO gifts (host_id, sender, gift_name, amount)
+      VALUES (?, ?, ?, ?)
+    `).run(req.host.id, sender, gift, amount);
+
+    res.json({ id: Number(info.lastInsertRowid) });
+  });
+
+app.get("/api/hosts/:hostId/gifts",
+  auth, activeKey, ownHost, (req, res) => {
+    res.json(db.prepare(`
+      SELECT * FROM gifts WHERE host_id=?
+      ORDER BY id DESC LIMIT 200
+    `).all(req.host.id));
+  });
+
+// SERVER
+app.get("/api/health", (req, res) => {
+  res.json({ name: "ZANN ELIMINASI VIP", status: "ONLINE" });
+});
+
+app.listen(PORT, () => {
+  console.log("ZANN ELIMINASI VIP berjalan di port " + PORT);
+});
