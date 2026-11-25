@@ -1,62 +1,95 @@
 
-const { Pool } = require("pg");
+const Database = require("better-sqlite3");
 
-if (!process.env.DATABASE_URL) {
-  console.warn("DATABASE_URL belum diatur");
-}
+const db = new Database("zann-vip.db");
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production"
-    ? { rejectUnauthorized: false }
-    : undefined,
-  max: 5
-});
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
-async function query(sql, params = []) {
-  return pool.query(sql, params);
-}
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE,
+  role TEXT DEFAULT 'user',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 
-async function initDb() {
-  await query(`
-    CREATE TABLE IF NOT EXISTS orders (
-      id TEXT PRIMARY KEY,
-      customer_name TEXT NOT NULL,
-      package_code TEXT NOT NULL,
-      key_count INTEGER NOT NULL,
-      amount INTEGER NOT NULL,
-      payment_method TEXT NOT NULL DEFAULT 'TRANSFER_MANUAL',
-      status TEXT NOT NULL DEFAULT 'MENUNGGU_PEMBAYARAN',
-      proof_note TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      verified_at TIMESTAMPTZ
-    );
+CREATE TABLE IF NOT EXISTS keys_table (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  duration INTEGER,
+  permanent INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'UNUSED',
+  user_id INTEGER,
+  activated_at INTEGER,
+  expires_at INTEGER,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 
-    CREATE TABLE IF NOT EXISTS access_keys (
-      id BIGSERIAL PRIMARY KEY,
-      key_hash TEXT UNIQUE NOT NULL,
-      package_code TEXT NOT NULL,
-      duration_days INTEGER,
-      permanent BOOLEAN DEFAULT FALSE,
-      status TEXT DEFAULT 'BELUM_DIGUNAKAN',
-      order_id TEXT REFERENCES orders(id),
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      expires_at TIMESTAMPTZ,
-      used_at TIMESTAMPTZ
-    );
+CREATE TABLE IF NOT EXISTS hosts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER NOT NULL,
+  username TEXT NOT NULL,
+  connected INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 
-    CREATE TABLE IF NOT EXISTS key_sessions (
-      id BIGSERIAL PRIMARY KEY,
-      key_id BIGINT REFERENCES access_keys(id),
-      session_token_id TEXT NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      revoked_at TIMESTAMPTZ
-    );
-  `);
-}
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  order_code TEXT UNIQUE,
+  quantity INTEGER,
+  total INTEGER,
+  duration INTEGER,
+  status TEXT DEFAULT 'PENDING',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 
-module.exports = {
-  query,
-  initDb,
-  pool
-};
+CREATE TABLE IF NOT EXISTS participants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  host_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  eliminated INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS gifts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  host_id INTEGER NOT NULL,
+  sender TEXT,
+  gift_name TEXT,
+  amount INTEGER DEFAULT 1,
+  source TEXT DEFAULT 'manual',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS game_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  host_id INTEGER NOT NULL,
+  game_type TEXT NOT NULL,
+  status TEXT DEFAULT 'IDLE',
+  duration INTEGER DEFAULT 0,
+  ends_at INTEGER,
+  locked INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS game_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  host_id INTEGER NOT NULL,
+  game_type TEXT NOT NULL,
+  details TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_participants_host
+ON participants(host_id);
+
+CREATE INDEX IF NOT EXISTS idx_gifts_host
+ON gifts(host_id);
+
+CREATE INDEX IF NOT EXISTS idx_keys_code
+ON keys_table(code);
+`);
+
+module.exports = db;
