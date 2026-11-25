@@ -1,0 +1,430 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZANN ELIMINASI VIP</title>
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;background:#080711;color:white;
+ font-family:Arial,sans-serif;
+}
+header{
+ padding:22px;text-align:center;
+ background:linear-gradient(120deg,#160c35,#071b39);
+ border-bottom:1px solid #783cff;
+}
+.logo{font-size:27px;font-weight:900;color:#c5a1ff}
+main{max-width:950px;margin:auto;padding:18px}
+.card{
+ background:#141222;border:1px solid #373052;
+ padding:18px;border-radius:15px;margin-bottom:17px;
+}
+h2{color:#b998ff}
+input,select{
+ width:100%;padding:13px;margin:7px 0;
+ background:#090817;color:white;
+ border:1px solid #514275;border-radius:8px;
+}
+button{
+ padding:12px 17px;border:0;border-radius:8px;
+ background:#792eff;color:white;font-weight:bold;
+ cursor:pointer;margin:5px 0;
+}
+button:hover{background:#9a63ff}
+.price{color:#ffd66b;font-size:21px;font-weight:bold}
+.hidden{display:none}
+.item{
+ padding:12px;background:#211c32;
+ border-radius:8px;margin:7px 0;
+}
+.status{color:#55e7ad}
+#message{white-space:pre-wrap;color:#ffd66b}
+.character{
+ display:inline-block;padding:12px;margin:5px;
+ background:#25203b;border-radius:9px;cursor:pointer;
+}
+</style>
+</head>
+<body>
+<header>
+ <div class="logo">⚡ ZANN ELIMINASI VIP</div>
+ <p>PREMIUM GAMING PLATFORM</p>
+</header>
+
+<main>
+<div id="message"></div>
+
+<section class="card">
+<h2>STORE KEY</h2>
+<p>1 KEY untuk 1 akun.</p>
+
+<select id="days">
+<option value="3">3 HARI - Rp5.000</option>
+<option value="7">7 HARI - Rp10.000</option>
+<option value="30">30 HARI - Rp40.000</option>
+<option value="0">PERMANEN - Rp100.000</option>
+</select>
+
+<input id="quantity" type="number" min="1"
+max="100" value="1" placeholder="Jumlah KEY">
+
+<input id="buyer" placeholder="Nama pembeli">
+
+<div class="price" id="total">Rp5.000</div>
+<button onclick="buy()">BELI SEKARANG</button>
+
+<div id="orderInfo"></div>
+</section>
+
+<section class="card">
+<h2>LOGIN KEY</h2>
+<input id="key" placeholder="Masukkan KEY">
+<button onclick="login()">MASUK</button>
+</section>
+
+<section class="card">
+<h2>ADMIN</h2>
+<input id="adminPassword" type="password"
+placeholder="Password Admin">
+<button onclick="adminLogin()">LOGIN ADMIN</button>
+<div id="adminPanel" class="hidden">
+<h3>BUAT KEY</h3>
+<input id="keyCount" type="number" value="1">
+<select id="keyDays">
+<option value="3">3 Hari</option>
+<option value="7">7 Hari</option>
+<option value="30">30 Hari</option>
+<option value="0">Permanen</option>
+</select>
+<button onclick="createKeys()">BUAT KEY</button>
+<div id="generatedKeys"></div>
+<h3>Verifikasi transaksi</h3>
+<input id="orderId" type="number" placeholder="ID transaksi">
+<button onclick="verifyOrder()">VERIFIKASI DAN TERBITKAN KEY</button>
+</div>
+</section>
+
+<section id="dashboard" class="hidden">
+<div class="card">
+<h2>DASHBOARD ZANN VIP</h2>
+<p class="status" id="accountStatus"></p>
+<button onclick="logout()">KELUAR</button>
+</div>
+
+<div class="card">
+<h2>HOST</h2>
+<input id="hostUsername" placeholder="Username TikTok">
+<button onclick="addHost()">TAMBAH HOST</button>
+<div id="hosts"></div>
+</div>
+
+<div class="card">
+<h2>ELIMINASI</h2>
+<select id="hostSelect"></select>
+<input id="participant" placeholder="Nama peserta">
+<button onclick="addParticipant()">TAMBAH PESERTA</button>
+<button onclick="loadParticipants()">REFRESH PESERTA</button>
+<select id="lockMode">
+<option value="1">LOCKED</option>
+<option value="0">NO LOCKED</option>
+</select>
+<input id="elimTime" type="number" value="60"
+placeholder="Waktu dalam detik">
+<button onclick="startTimer('elimination')">START ELIMINASI</button>
+<button onclick="getTimer('elimination')">CEK TIMER</button>
+<button onclick="resetParticipants()">RESET PESERTA</button>
+<div id="participants"></div>
+</div>
+
+<div class="card">
+<h2>LELANG</h2>
+<input id="auctionTime" type="number"
+value="60" placeholder="Waktu detik">
+<button onclick="startTimer('auction')">MULAI LELANG</button>
+<button onclick="getTimer('auction')">CEK TIMER LELANG</button>
+</div>
+
+<div class="card">
+<h2>MANUAL GIFT</h2>
+<input id="sender" placeholder="Nama pengirim">
+<input id="gift" placeholder="Nama gift">
+<input id="amount" type="number" value="1">
+<button onclick="sendGift()">TAMBAH GIFT</button>
+</div>
+
+<div class="card">
+<h2>BACKGROUND KARAKTER</h2>
+<p>Pilih tema karakter untuk area ini.</p>
+<div id="characters"></div>
+<div id="characterArea" style="
+min-height:180px;text-align:center;padding:35px;
+border-radius:12px;background:#21143d">
+PILIH KARAKTER
+</div>
+</div>
+</section>
+</main>
+
+<script>
+let token = "";
+let currentHost = null;
+
+const $ = id => document.getElementById(id);
+
+function message(text){
+ $("message").textContent=text;
+}
+
+async function api(path,method="GET",data=null){
+ const response=await fetch("/api"+path,{
+  method,
+  headers:{
+   "Content-Type":"application/json",
+   ...(token?{Authorization:"Bearer "+token}:{})
+  },
+  ...(data?{body:JSON.stringify(data)}:{})
+ });
+ const result=await response.json();
+ if(!response.ok)throw Error(result.error||"Terjadi kesalahan");
+ return result;
+}
+
+const prices={3:5000,7:10000,30:40000,0:100000};
+
+function rupiah(n){
+ return "Rp"+Number(n).toLocaleString("id-ID");
+}
+
+function updateTotal(){
+ const d=Number($("days").value);
+ const q=Math.max(1,Number($("quantity").value)||1);
+ $("total").textContent=rupiah(prices[d]*q);
+}
+$("days").onchange=updateTotal;
+$("quantity").oninput=updateTotal;
+
+async function buy(){
+ try{
+  const result=await api("/orders","POST",{
+   days:Number($("days").value),
+   quantity:Number($("quantity").value),
+   buyer:$("buyer").value
+  });
+  $("orderInfo").textContent=
+   "ID: "+result.id+
+   "\nNomor transaksi: "+result.orderCode+
+   "\nJumlah KEY: "+result.quantity+
+   "\nTotal: "+rupiah(result.total)+
+   "\nTransfer ke: "+result.destination+
+   "\nStatus: "+result.status+
+   "\n\nPembayaran menunggu pemeriksaan admin. Simpan nomor transaksi.";
+ }catch(e){message(e.message)}
+}
+
+async function login(){
+ try{
+  const result=await api("/login","POST",{
+   key:$("key").value
+  });
+  token=result.token;
+  showDashboard();
+ }catch(e){message(e.message)}
+}
+
+async function adminLogin(){
+ try{
+  const result=await api("/admin/login","POST",{
+   password:$("adminPassword").value
+  });
+  token=result.token;
+  $("adminPanel").classList.remove("hidden");
+  message("ADMIN LOGIN BERHASIL");
+ }catch(e){message(e.message)}
+}
+
+async function createKeys(){
+ try{
+  const result=await api("/admin/keys","POST",{
+   quantity:Number($("keyCount").value),
+   days:Number($("keyDays").value)
+  });
+  $("generatedKeys").textContent=result.keys.join("\n");
+ }catch(e){message(e.message)}
+}
+
+async function verifyOrder(){
+ try{
+  const result=await api(
+   "/admin/orders/"+$("orderId").value+"/verify",
+   "POST",{});
+  $("generatedKeys").textContent=result.keys.join("\n");
+  message("KEY BERHASIL DITERBITKAN");
+ }catch(e){message(e.message)}
+}
+
+async function showDashboard(){
+ try{
+  const me=await api("/me");
+  $("dashboard").classList.remove("hidden");
+  $("accountStatus").textContent=
+   me.key==="ADMIN"?"ADMIN":me.key.permanent?
+   "KEY PERMANEN":"KEY AKTIF";
+  if(me.key!=="ADMIN"&&!me.key.permanent){
+   $("accountStatus").textContent+=" | Berakhir: "+
+    new Date(me.key.expiresAt).toLocaleString("id-ID");
+  }
+  await loadHosts();
+ }catch(e){
+  token="";
+  message(e.message);
+ }
+}
+
+function logout(){
+ token="";
+ currentHost=null;
+ $("dashboard").classList.add("hidden");
+ message("Kamu telah keluar.");
+}
+
+async function addHost(){
+ try{
+  const result=await api("/hosts","POST",{
+   username:$("hostUsername").value
+  });
+  message("HOST BERHASIL DIBUAT: "+result.username);
+  await loadHosts();
+ }catch(e){message(e.message)}
+}
+
+async function loadHosts(){
+ try{
+  const hosts=await api("/hosts");
+  $("hosts").innerHTML="";
+  $("hostSelect").innerHTML="";
+  hosts.forEach(h=>{
+   const option=document.createElement("option");
+   option.value=h.id;
+   option.textContent=h.username;
+   $("hostSelect").appendChild(option);
+
+   const div=document.createElement("div");
+   div.className="item";
+   div.textContent=h.username+" - Host ID "+h.id;
+   $("hosts").appendChild(div);
+  });
+  currentHost=hosts.length?hosts[0].id:null;
+  $("hostSelect").onchange=()=>{
+   currentHost=Number($("hostSelect").value);
+   loadParticipants();
+  };
+ }catch(e){message(e.message)}
+}
+
+async function addParticipant(){
+ try{
+  currentHost=Number($("hostSelect").value);
+  await api("/hosts/"+currentHost+"/participants","POST",{
+   name:$("participant").value
+  });
+  $("participant").value="";
+  await loadParticipants();
+ }catch(e){message(e.message)}
+}
+
+async function loadParticipants(){
+ try{
+  currentHost=Number($("hostSelect").value);
+  const people=await api(
+   "/hosts/"+currentHost+"/participants"
+  );
+  $("participants").innerHTML="";
+  people.forEach(p=>{
+   const div=document.createElement("div");
+   div.className="item";
+   div.textContent=p.name+" ";
+   const button=document.createElement("button");
+   button.textContent="HAPUS";
+   button.onclick=async()=>{
+    try{
+     await api("/hosts/"+currentHost+
+       "/participants/"+p.id,"DELETE");
+     loadParticipants();
+    }catch(e){message(e.message)}
+   };
+   div.appendChild(button);
+   $("participants").appendChild(div);
+  });
+ }catch(e){message(e.message)}
+}
+
+async function resetParticipants(){
+ if(!confirm("Reset semua peserta host ini?"))return;
+ try{
+  await api("/hosts/"+currentHost+"/participants","DELETE");
+  loadParticipants();
+ }catch(e){message(e.message)}
+}
+
+async function startTimer(type){
+ try{
+  currentHost=Number($("hostSelect").value);
+  const seconds=Number(type==="auction"?
+   $("auctionTime").value:$("elimTime").value);
+  const locked=type==="elimination"?
+   $("lockMode").value==="1":true;
+
+  await api("/hosts/"+currentHost+"/timer","POST",{
+   gameType:type,seconds,locked
+  });
+  message("TIMER DIMULAI");
+ }catch(e){message(e.message)}
+}
+
+async function getTimer(type){
+ try{
+  const result=await api(
+   "/hosts/"+currentHost+"/timer/"+type
+  );
+  message(type.toUpperCase()+": "+result.status+
+   "\nSisa waktu: "+result.remaining+" detik");
+ }catch(e){message(e.message)}
+}
+
+async function sendGift(){
+ try{
+  await api("/hosts/"+currentHost+"/gifts","POST",{
+   sender:$("sender").value,
+   gift:$("gift").value,
+   amount:Number($("amount").value)
+  });
+  message("MANUAL GIFT TERSIMPAN");
+ }catch(e){message(e.message)}
+}
+
+// Tema individual, bukan kolase.
+// Tema ini merupakan pilihan visual, bukan gambar karakter asli.
+const themes=[
+ "Naruto","Sasuke","Sakura","Kakashi","Itachi",
+ "Madara","Hinata","Gaara","Minato","Jiraiya",
+ "Gojo","Yuji","Megumi","Nobara","Sukuna",
+ "Geto","Toji","Yuta","Maki","Nanami"
+];
+
+themes.forEach(name=>{
+ const button=document.createElement("span");
+ button.className="character";
+ button.textContent=name;
+ button.onclick=()=>{
+  $("characterArea").textContent=name;
+  $("characterArea").style.background=
+   "linear-gradient(135deg,#26134b,#102c52)";
+ };
+ $("characters").appendChild(button);
+});
+</script>
+</body>
+</html>
